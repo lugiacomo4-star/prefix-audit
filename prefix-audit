@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+# prefix-audit — how many input tokens does one Claude Code question actually cost,
+# and how much of that is the fixed prefix you pay on every single API call?
+#
+# Usage:  ./prefix-audit "your question here"
+#         ./prefix-audit "your question" --keep   # keep the raw stream-json
+set -euo pipefail
+
+PROMPT="${1:?usage: prefix-audit \"your question\" [--keep]}"
+KEEP="${2:-}"
+RAW="$(mktemp -t prefix-audit.XXXXXX.jsonl)"
+
+command -v claude >/dev/null || { echo "claude not found in PATH" >&2; exit 1; }
+
+echo "running: claude -p (model: whatever your config selects)" >&2
+claude -p "$PROMPT" --output-format stream-json --verbose < /dev/null > "$RAW"
+
+python3 - "$RAW" <<'PY'
+import json, sys
+calls = []
+for line in open(sys.argv[1]):
+    line = line.strip()
+    if not line:
+        continue
+    try:
+        ev = json.loads(line)
+    except json.JSONDecodeError:
+        continue
+    u = (ev.get("message") or {}).get("usage")
+    if not isinstance(u, dict):
+        continue
+    inp = u.get("input_tokens", 0) or 0
+    cc  = u.get("cache_creation_input_tokens", 0) or 0
+    cr  = u.get("cache_read_input_tokens", 0) or 0
+    if inp or cc or cr:
+        calls.append((inp, cc, cr))
+
+if not calls:
+    print("no usage records found — is this Claude Code stream-json output?")
+    sys.exit(1)
+
+total = sum(sum(c) for c in calls)
+n = len(calls)
+# The prefix is what every call pays before your conversation: the smallest
+# per-call total is the closest honest estimate of it.
+prefix = min(sum(c) for c in calls)
+
+print()
+print(f"  API calls              {n}")
+print(f"  input tokens (total)   {total:,}")
+print(f"  smallest single call   {prefix:,}   <- roughly your fixed prefix")
+print(f"  prefix x calls         {prefix*n:,}   ({prefix*n/total:.0%} of the total)")
+print()
+print("  per call:")
+for i, (inp, cc, cr) in enumerate(calls, 1):
+    print(f"    {i:>2}  input {inp:>8,}   cache created {cc:>8,}   cache read {cr:>8,}   = {inp+cc+cr:>9,}")
+print()
+print("  If 'prefix x calls' is most of the total, you are mostly paying for the")
+print("  catalogue of tools you could use, not for your code. Turning on tool")
+print("  search, or switching off MCP servers you are not using, is the lever.")
+PY
+
+if [ "$KEEP" = "--keep" ]; then
+  echo "raw stream kept at $RAW" >&2
+else
+  rm -f "$RAW"
+fi
