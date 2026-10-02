@@ -8,16 +8,28 @@ set -euo pipefail
 
 PROMPT="${1:?usage: prefix-audit \"your question\" [--keep]}"
 KEEP="${2:-}"
-RAW="$(mktemp -t prefix-audit.XXXXXX.jsonl)"
+RAW="$(mktemp -t prefix-audit.XXXXXX)"
 
 command -v claude >/dev/null || { echo "claude not found in PATH" >&2; exit 1; }
 
 echo "running: claude -p (model: whatever your config selects)" >&2
 claude -p "$PROMPT" --output-format stream-json --verbose < /dev/null > "$RAW"
 
-python3 - "$RAW" <<'PY'
+python3 - "$RAW" <<'PYEOF'
 import json, sys
+
 calls = []
+source = None
+
+def triple(d):
+    return (d.get("input_tokens") or 0,
+            d.get("cache_creation_input_tokens") or 0,
+            d.get("cache_read_input_tokens") or 0)
+
+# Preferred: the result event's usage.iterations — Claude Code's own per-API-call
+# breakdown. Exact, and it cannot be confused by an event appearing twice in the
+# stream (a retried call shows up there as the separate call it really is).
+seen = {}
 for line in open(sys.argv[1]):
     line = line.strip()
     if not line:
@@ -26,23 +38,27 @@ for line in open(sys.argv[1]):
         ev = json.loads(line)
     except json.JSONDecodeError:
         continue
-    u = (ev.get("message") or {}).get("usage")
-    if not isinstance(u, dict):
-        continue
-    inp = u.get("input_tokens", 0) or 0
-    cc  = u.get("cache_creation_input_tokens", 0) or 0
-    cr  = u.get("cache_read_input_tokens", 0) or 0
-    if inp or cc or cr:
-        calls.append((inp, cc, cr))
+
+    if ev.get("type") == "result":
+        it = ((ev.get("usage") or {}).get("iterations")) or []
+        if it:
+            calls = [triple(x) for x in it]
+            source = "result.usage.iterations"
+
+    msg = ev.get("message") or {}
+    u = msg.get("usage")
+    if isinstance(u, dict) and any(triple(u)):
+        seen.setdefault(msg.get("id") or f"anon{len(seen)}", triple(u))
 
 if not calls:
-    print("no usage records found — is this Claude Code stream-json output?")
-    sys.exit(1)
+    if not seen:
+        print("no usage records found — is this Claude Code stream-json output?")
+        sys.exit(1)
+    calls = list(seen.values())
+    source = "assistant messages (deduplicated by id)"
 
-total = sum(sum(c) for c in calls)
-n = len(calls)
-# The prefix is what every call pays before your conversation: the smallest
-# per-call total is the closest honest estimate of it.
+total  = sum(sum(c) for c in calls)
+n      = len(calls)
 prefix = min(sum(c) for c in calls)
 
 print()
@@ -55,10 +71,12 @@ print("  per call:")
 for i, (inp, cc, cr) in enumerate(calls, 1):
     print(f"    {i:>2}  input {inp:>8,}   cache created {cc:>8,}   cache read {cr:>8,}   = {inp+cc+cr:>9,}")
 print()
+print(f"  (source: {source})")
+print()
 print("  If 'prefix x calls' is most of the total, you are mostly paying for the")
 print("  catalogue of tools you could use, not for your code. Turning on tool")
 print("  search, or switching off MCP servers you are not using, is the lever.")
-PY
+PYEOF
 
 if [ "$KEEP" = "--keep" ]; then
   echo "raw stream kept at $RAW" >&2

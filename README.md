@@ -2,18 +2,18 @@
 
 I asked Claude Code to reply with the single word `ok`.
 
-It cost **38,837 input tokens**. Two of them were my question.
+It cost **56,105 input tokens**. Two of them were my question.
 
 ```
   API calls              1
-  input tokens (total)   38,837
-  smallest single call   38,837   <- roughly your fixed prefix
+  input tokens (total)   56,105
+  smallest single call   56,105   <- roughly your fixed prefix
 
   per call:
-     1  input        2   cache created   38,835   cache read        0   =    38,837
+     1  input        2   cache created   43,160   cache read   12,943   =    56,105
 ```
 
-That 38,835 is the prefix: the system prompt plus the full description of every
+That 56,103 is the prefix: the system prompt plus the full description of every
 tool you have connected, re-sent on every single API call, whether the model
 touches those tools or not. On a multi-step task you pay it once per call.
 
@@ -70,8 +70,9 @@ codebase and an architecture question, not on 27 files.
 
 ## Caveats, because they decide how much this is worth
 
-- One task, one repo. The `ok` floor reproduces exactly (38,837 twice); the
-  comparison table is a single afternoon.
+- One task, one repo. The `ok` floor is stable to within ~1% across runs (56,105
+  and 56,579 on two runs; the difference is cache warmth). The comparison table
+  below is a single afternoon and I no longer have its raw stream-json.
 - Dollar cost is not a clean comparison — it depends how warm your cache already
   was. Input tokens are.
 - My task was short. On a long session that reads many files, the 1.9%
@@ -83,7 +84,8 @@ codebase and an architecture question, not on 27 files.
 ## What I'd like
 
 Run the `ok` prompt and tell me your floor, with a rough count of how many MCP
-servers you have switched on. I want to know whether ~38k is normal or whether
-I just have too many connected.
+servers you have switched on. I want to know whether ~56k is normal or whether
+I just have too many connected. On a second machine with fewer servers connected
+the same prompt cost 38,837, so the spread is real and I'd like to map it.
 
 MIT.
