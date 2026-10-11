@@ -81,6 +81,47 @@ codebase and an architecture question, not on 27 files.
   *inside* Claude Code failed outright: every shell command stopped for an
   approval nobody was there to give, 17 wasted API calls.
 
+## Plugin cost: the per-plugin number is honest, the sum isn't
+
+`claude plugin details <name>` prints an "always-on" token figure: what that
+plugin adds to every session. I checked it against the real API bill with the
+`ok` prompt on this machine, Claude Code 2.1.294, nothing switched on but the
+plugin under test. Each configuration was measured twice and returned the same
+total to the token.
+
+| configuration | input tokens | delta | `plugin details` claims |
+|---|---|---|---|
+| no plugins | 41,458 | — | — |
+| plugin A alone (1 skill) | 41,756 | +298 | ~303 |
+| plugin B alone (2 skills) | 41,714 | +256 | ~259 |
+| A and B together | 41,694 | **+236** | ~562 |
+
+Per plugin the estimate is good: 303 vs 298, 259 vs 256, both within 2%.
+
+Together they bill 236 — less than A alone, less than B alone. Adding a plugin
+made the prefix smaller. I can't explain it. The deltas are reproducible, so it
+isn't cache warmth, and the enabled/disabled state was verified with
+`claude plugin list` before each measurement.
+
+The practical consequence: that column can't be added up. "What are my plugins
+costing me" is only answerable by measuring the whole prefix with your actual
+set switched on.
+
+Separately, from the same run: the scaffold `claude plugin init` generates
+reports `Skills (0)` and `~0 tok`. It costs **71 tokens** of prefix on every
+session — its root `SKILL.md` is loaded but not counted as a component.
+
+### Repeat it
+
+```sh
+./prefix-audit "Reply with exactly: ok"   # your floor, as configured now
+claude plugin disable <plugin>            # one at a time
+./prefix-audit "Reply with exactly: ok"   # same prompt, measure again
+claude plugin list                        # confirm the state you think you're in
+```
+
+If the sum breaks on your machine too, I'd like the three numbers: A, B, A+B.
+
 ## What I'd like
 
 Run the `ok` prompt and tell me your floor, with a rough count of how many MCP
