@@ -13,7 +13,7 @@ It cost **56,105 input tokens**. Two of them were my question.
      1  input        2   cache created   43,160   cache read   12,943   =    56,105
 ```
 
-That 56,103 is the prefix: the system prompt plus the full description of every
+That 56,105 is the prefix: the system prompt plus the full description of every
 tool you have connected, re-sent on every single API call, whether the model
 touches those tools or not. On a multi-step task you pay it once per call.
 
