@@ -1,0 +1,168 @@
+#!/usr/bin/env python3
+"""mcp-name-tax - what does one MCP tool actually cost you in context?
+
+Spins up a throwaway MCP server with a known number of tools, known name
+lengths and known schema sizes, asks Claude Code one trivial question, and
+reads the input tokens off the stream-json. Nothing is sent anywhere except
+to the same API Claude Code already talks to, and the stub server exposes
+no real capability: it answers tools/list and nothing else.
+
+    ./mcp-name-tax            # the full table
+    ./mcp-name-tax --tools 80 # heavier sweep
+    ./mcp-name-tax --json     # machine-readable
+
+Needs: claude, python3. No other dependencies.
+"""
+import argparse, json, os, subprocess, sys, tempfile
+
+SELF = os.path.abspath(__file__)
+
+# ---------------------------------------------------------------- stub server
+PAD = ("Retrieve a single record from the workspace by its identifier. "
+       "Returns the record fields, timestamps and the last editor. ")
+
+
+def stub():
+    n = int(os.environ.get("TAX_N", "0"))
+    namelen = os.environ.get("TAX_NAME", "mid")
+    pad = int(os.environ.get("TAX_PAD", "1"))
+    prefix = {"short": "t", "mid": "get_record_",
+              "long": "retrieve_workspace_record_by_identifier_with_history_variant_"}[namelen]
+    desc = PAD * pad
+    tools = [{
+        "name": f"{prefix}{i}",
+        "description": desc,
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "record_id": {"type": "string", "description": "Identifier of the record."},
+                "include_history": {"type": "boolean", "description": "Also return revision history."},
+                "fields": {"type": "array", "items": {"type": "string"},
+                           "description": "Field names to return instead of the whole record."},
+            },
+            "required": ["record_id"],
+        },
+    } for i in range(n)]
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            msg = json.loads(line)
+        except ValueError:
+            continue
+        method, mid = msg.get("method"), msg.get("id")
+        if method == "initialize":
+            res = {"protocolVersion": "2024-11-05", "capabilities": {"tools": {}},
+                   "serverInfo": {"name": "mcp-name-tax-stub", "version": "1"}}
+        elif method == "tools/list":
+            res = {"tools": tools}
+        elif method in ("resources/list", "prompts/list"):
+            res = {method.split("/")[0]: []}
+        else:
+            res = None
+        if mid is not None and res is not None:
+            sys.stdout.write(json.dumps({"jsonrpc": "2.0", "id": mid, "result": res}) + "\n")
+            sys.stdout.flush()
+
+
+# ------------------------------------------------------------------- measuring
+def schema_bytes(namelen, pad):
+    env = dict(os.environ, TAX_N="1", TAX_NAME=namelen, TAX_PAD=str(pad))
+    out = subprocess.run([sys.executable, SELF, "--stub"], env=env, input=
+                         '{"jsonrpc":"2.0","id":1,"method":"tools/list"}\n',
+                         capture_output=True, text=True, timeout=60).stdout
+    return len(json.dumps(json.loads(out)["result"]["tools"][0]))
+
+
+def measure(n, namelen, pad, model=None):
+    cfg = {"mcpServers": {"taxstub": {
+        "command": sys.executable, "args": [SELF, "--stub"],
+        "env": {"TAX_N": str(n), "TAX_NAME": namelen, "TAX_PAD": str(pad)}}}}
+    cmd = ["claude", "-p", ".", "--output-format", "stream-json", "--verbose",
+           "--mcp-config", json.dumps(cfg)]
+    if model:
+        cmd += ["--model", model]
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+    tokens = tools = None
+    for line in proc.stdout.splitlines():
+        try:
+            d = json.loads(line)
+        except ValueError:
+            continue
+        if d.get("type") == "system" and d.get("subtype") == "init":
+            tools = len(d.get("tools", []))
+        if d.get("type") == "assistant":
+            u = d["message"].get("usage", {})
+            tokens = (u.get("input_tokens", 0) + u.get("cache_creation_input_tokens", 0)
+                      + u.get("cache_read_input_tokens", 0))
+            break
+    if tokens is None:
+        sys.exit("could not read usage from claude; is `claude` on PATH and logged in?\n"
+                 + proc.stderr[-500:])
+    return tokens, tools
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--stub", action="store_true", help=argparse.SUPPRESS)
+    ap.add_argument("--tools", type=int, default=40, help="tools in the loaded runs (default 40)")
+    ap.add_argument("--model", default=None)
+    ap.add_argument("--json", action="store_true")
+    a = ap.parse_args()
+    if a.stub:
+        return stub()
+
+    n = a.tools
+    runs = [("baseline, no stub tools", 0, "mid", 1),
+            ("short names  (t0)", n, "short", 1),
+            ("mid names    (get_record_0)", n, "mid", 1),
+            ("long names   (retrieve_workspace_...)", n, "long", 1),
+            ("mid names, fatter schema", n, "mid", 20)]
+
+    base = None
+    rows = []
+    for label, cnt, namelen, pad in runs:
+        tok, ntools = measure(cnt, namelen, pad, a.model)
+        if base is None:
+            base = tok
+        per = (tok - base) / cnt if cnt else 0.0
+        rows.append({"label": label, "tools": cnt, "name_style": namelen,
+                     "schema_bytes": schema_bytes(namelen, pad),
+                     "prompt_tokens": tok, "delta": tok - base,
+                     "tokens_per_tool": round(per, 1), "tools_visible": ntools})
+
+    if a.json:
+        print(json.dumps({"tools": n, "rows": rows}, indent=2))
+        return
+
+    w = max(len(r["label"]) for r in rows)
+    print(f"\n{'run'.ljust(w)}  {'schema B':>8} {'prompt tok':>10} {'delta':>7} {'tok/tool':>8}")
+    print("-" * (w + 38))
+    for r in rows:
+        print(f"{r['label'].ljust(w)}  {r['schema_bytes']:>8} {r['prompt_tokens']:>10} "
+              f"{r['delta']:>7} {r['tokens_per_tool']:>8}")
+
+    mid = next(r for r in rows if r["label"].startswith("mid names  "))
+    fat = next(r for r in rows if "fatter" in r["label"])
+    short = next(r for r in rows if r["label"].startswith("short"))
+    long_ = next(r for r in rows if r["label"].startswith("long"))
+
+    print()
+    gap = fat["delta"] - mid["delta"]
+    pct = 100.0 * gap / mid["delta"] if mid["delta"] else 0
+    print(f"schema {fat['schema_bytes']}B vs {mid['schema_bytes']}B, same {n} tools: "
+          f"{gap:+d} tokens ({pct:+.1f}%)")
+    if abs(pct) < 10:
+        print("  -> your tool SCHEMAS are not in the prompt. They load on demand.")
+    else:
+        print("  -> your tool schemas ARE in the prompt; every byte costs you.")
+    print(f"name length, same {n} tools and same schema: "
+          f"{short['tokens_per_tool']} -> {mid['tokens_per_tool']} -> "
+          f"{long_['tokens_per_tool']} tokens per tool")
+    print(f"  -> {n} tools cost you {long_['delta'] - short['delta']} tokens more "
+          f"with long names than with short ones.\n")
+
+
+if __name__ == "__main__":
+    main()

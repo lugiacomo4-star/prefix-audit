@@ -17,6 +17,12 @@ That 56,105 is the prefix: the system prompt plus the full description of every
 tool you have connected, re-sent on every single API call, whether the model
 touches those tools or not. On a multi-step task you pay it once per call.
 
+> **Correction, 16 November 2026 — Claude Code 2.1.325.** The "full description
+> of every tool" half of that sentence is no longer true on this build. Tool
+> *schemas* are not in the prompt any more; only tool *names* are, and the
+> schemas load on demand. The prefix is still re-sent on every call — it just
+> carries a list instead of a catalogue. Measured below with `mcp-name-tax`.
+
 This repo is one script that tells you your own number.
 
 ## Usage
@@ -122,11 +128,64 @@ claude plugin list                        # confirm the state you think you're i
 
 If the sum breaks on your machine too, I'd like the three numbers: A, B, A+B.
 
+## The catalogue left the prompt. The names stayed.
+
+`prefix-audit` measures your prefix. It doesn't tell you what's *in* it. So I
+built a throwaway MCP server that answers `tools/list` and nothing else, pointed
+Claude Code at it with `--mcp-config`, and changed one variable at a time.
+
+Claude Code 2.1.325, Opus 5.5, 40 stub tools, same trivial prompt each time.
+Each row is the whole prompt: `input` + `cache_creation` + `cache_read`.
+
+| 40 stub tools | schema bytes each | prompt tokens | delta | per tool |
+|---|---|---|---|---|
+| none connected (baseline) | — | 44,887 | — | — |
+| names `t0`…`t39` | 525 | 45,371 | +484 | 12.1 |
+| names `get_record_0`… | 535 | 45,485 | +598 | 14.9 |
+| names `retrieve_workspace_record_by_identifier_with_history_variant_0`… | 585 | 46,289 | +1,402 | 35.0 |
+| names `get_record_0`…, fatter schema | 2,853 | 45,488 | +601 | 15.0 |
+
+Two readings:
+
+**Schema size costs nothing.** Row 3 and row 5 are the same 40 tools with the
+same names. Row 5's schemas are 5.3x larger — 2,853 bytes against 535, about 93 KB of extra JSON
+across the server. It bought 3 extra tokens of prompt, 0.5%.
+The schemas are not being sent. They load when the model goes looking for them.
+
+**Name length costs plenty.** Rows 2 to 4 keep the description and the parameters
+identical and change only the names. Two characters to 62 characters moves the same 40 tools from
+484 tokens to 1,402. Per tool, 12 to 35.
+
+What's in your prompt is a list of names. That is also all the model has when it
+decides whether your tool is worth opening.
+
+Stable across runs: repeated measurements landed within ~5 tokens of each other.
+
+### Repeat it
+
+```sh
+./mcp-name-tax             # the table above, on your build
+./mcp-name-tax --tools 80  # heavier sweep
+./mcp-name-tax --json      # machine-readable
+```
+
+It needs `claude` and `python3`, takes about a minute, and talks to no network
+service that Claude Code wasn't already talking to. The stub server exposes no
+capability: it answers `tools/list` and ignores everything else.
+
+If your build still ships the full schemas, the script says so in plain words —
+and I'd like to hear it, because then this is environment-specific and not a
+version change.
+
 ## What I'd like
 
 Run the `ok` prompt and tell me your floor, with a rough count of how many MCP
 servers you have switched on. I want to know whether ~56k is normal or whether
 I just have too many connected. On a second machine with fewer servers connected
 the same prompt cost 38,837, so the spread is real and I'd like to map it.
+
+Run `./mcp-name-tax` too and tell me your tokens per tool, with a rough count of
+how many tools you have switched on. I measured 15 in a Linux container; I don't
+know whether that number travels.
 
 MIT.
