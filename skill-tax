@@ -1,0 +1,117 @@
+#!/usr/bin/env python3
+"""skill-tax - what does one installed skill cost you in context?
+
+Everyone says the same thing: don't install too many skills, they eat your
+context window. This measures it.
+
+The script builds a throwaway project with N skills in `.claude/skills/`, each
+with a real frontmatter description and a deliberately fat body, asks Claude
+Code one trivial question, and reads the input tokens off the stream-json. It
+also measures the same project with `--disable-slash-commands`, which switches
+the whole skill and command catalogue off - the difference between those two
+numbers is what your catalogue costs per API call.
+
+    ./skill-tax                      # the table
+    ./skill-tax --skills 0,10,100    # pick your own counts
+    ./skill-tax --json               # machine-readable
+
+Nothing is sent anywhere except to the same API Claude Code already talks to.
+The generated skills are in a temp directory and are deleted on exit.
+
+Needs: claude, python3. No other dependencies.
+"""
+import argparse, json, os, shutil, subprocess, sys, tempfile
+
+DESC = ("Reconcile ledger rows against bank statements. Use when the user asks to "
+        "match transactions, flag duplicates, or produce a monthly variance report "
+        "with the assumptions written out.")
+BODY_LINE = ("Step {}: a long body paragraph that must never be loaded into the "
+             "context window until the skill is actually invoked by name.\n")
+BODY_LINES = 200
+PROMPT = "say ok"
+
+
+def make_skills(root, n):
+    sk = os.path.join(root, ".claude", "skills")
+    shutil.rmtree(sk, ignore_errors=True)
+    os.makedirs(sk, exist_ok=True)
+    for i in range(1, n + 1):
+        name = "ledger-check-%d" % i
+        d = os.path.join(sk, name)
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, "SKILL.md"), "w") as f:
+            f.write("---\nname: %s\ndescription: %s\n---\n\n" % (name, DESC))
+            for j in range(1, BODY_LINES + 1):
+                f.write(BODY_LINE.format(j))
+    return sum(os.path.getsize(os.path.join(dp, fn))
+               for dp, _, fns in os.walk(sk) for fn in fns)
+
+
+def measure(root, extra):
+    cmd = ["claude", "-p", PROMPT, "--output-format", "stream-json", "--verbose"] + extra
+    p = subprocess.run(cmd, cwd=root, stdin=subprocess.DEVNULL,
+                       stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+    total = None
+    for line in p.stdout.splitlines():
+        try:
+            d = json.loads(line)
+        except ValueError:
+            continue
+        if d.get("type") == "result":
+            u = d.get("usage") or {}
+            total = (u.get("input_tokens", 0)
+                     + u.get("cache_creation_input_tokens", 0)
+                     + u.get("cache_read_input_tokens", 0))
+    if total is None:
+        sys.exit("skill-tax: no result line from `claude`. Is it signed in?")
+    return total
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--skills", default="0,10,100",
+                    help="comma-separated skill counts to measure (default 0,10,100)")
+    ap.add_argument("--json", action="store_true")
+    a = ap.parse_args()
+    counts = [int(x) for x in a.skills.split(",") if x.strip()]
+
+    root = tempfile.mkdtemp(prefix="skill-tax-")
+    rows = []
+    try:
+        biggest = max(counts)
+        bytes_on_disk = make_skills(root, biggest)
+        off = measure(root, ["--disable-slash-commands"])
+        rows.append({"skills": biggest, "catalogue": "off", "disk_bytes": bytes_on_disk,
+                     "prompt_tokens": off, "catalogue_tokens": 0})
+        for n in counts:
+            b = make_skills(root, n)
+            on = measure(root, [])
+            rows.append({"skills": n, "catalogue": "on", "disk_bytes": b,
+                         "prompt_tokens": on, "catalogue_tokens": on - off})
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+    if a.json:
+        print(json.dumps({"prompt": PROMPT, "rows": rows}, indent=2))
+        return
+
+    print("prompt: %r   (prompt tokens = input + cache_creation + cache_read)\n" % PROMPT)
+    print("  %-8s %-10s %12s %14s %10s" % ("skills", "catalogue", "disk", "prompt tokens", "catalogue"))
+    for r in rows:
+        print("  %-8d %-10s %11.1fK %14s %10s" % (
+            r["skills"], r["catalogue"], r["disk_bytes"] / 1024.0,
+            "{:,}".format(r["prompt_tokens"]),
+            "{:+,}".format(r["catalogue_tokens"]) if r["catalogue"] == "on" else "-"))
+    on_rows = [r for r in rows if r["catalogue"] == "on"]
+    if len(on_rows) > 1:
+        lo, hi = on_rows[0], on_rows[-1]
+        d = hi["catalogue_tokens"] - lo["catalogue_tokens"]
+        print("\n  %d extra skills (%+.1fK on disk) moved the catalogue by %+d tokens."
+              % (hi["skills"] - lo["skills"],
+                 (hi["disk_bytes"] - lo["disk_bytes"]) / 1024.0, d))
+        if d <= 0:
+            print("  The catalogue does not grow with the number of skills on this build.")
+
+
+if __name__ == "__main__":
+    main()

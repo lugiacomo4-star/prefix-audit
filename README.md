@@ -177,6 +177,60 @@ If your build still ships the full schemas, the script says so in plain words â€
 and I'd like to hear it, because then this is environment-specific and not a
 version change.
 
+## 100 skills cost less than 10
+
+The advice everywhere is to keep your skills folder small so it doesn't eat your
+context. `skill-tax` measures it. It builds a throwaway project with N skills in
+`.claude/skills/` - real frontmatter description, 200-line body each - asks the
+same trivial question, and reads the tokens off the stream-json. Then it runs the
+same project with `--disable-slash-commands`, which switches the whole skill and
+command catalogue off. The gap between those two numbers is what the catalogue
+costs you on every API call.
+
+Claude Code 2.1.328, Opus 5.5, Linux container, empty project, no CLAUDE.md.
+
+```
+prompt: 'say ok'   (prompt tokens = input + cache_creation + cache_read)
+
+  skills   catalogue          disk  prompt tokens  catalogue
+  100      off             2491.9K         43,702          -
+  0        on                 0.0K         45,488     +1,786
+  10       on               249.2K         45,495     +1,793
+  100      on              2491.9K         44,870     +1,168
+```
+
+Ten skills cost 7 tokens. A hundred skills - 2.4 MB of `SKILL.md` on disk - cost
+618 tokens *less* than none.
+
+Two readings:
+
+**The bodies are not in the prompt.** 2.4 MB of skill text on disk, and the
+prompt went down. Only the catalogue line is ever sent; the body loads when the
+skill is invoked.
+
+**The catalogue does not grow with your folder.** It sat between 1,168 and 1,793
+tokens whether the project had 0 skills or 100. Note that the 0-skill row is not
+zero: that machine already had the built-in commands and a set of plugin skills.
+Read the deltas between rows, not the absolute numbers.
+
+So the price of a big skills folder is not tokens. What I can't tell yet is what
+gets dropped when the allowance is full - the oldest skill, the longest
+description, or something else. The `--disable-slash-commands` floor was the
+stablest number in the whole repo: measured by hand twice, once with 10 skills in
+the project and once with 100, it came back as 43,770 both times, to the token.
+The script's own run landed at 43,702.
+
+### Repeat it
+
+```sh
+./skill-tax                     # the table above, on your build
+./skill-tax --skills 0,50,200   # pick your own counts
+./skill-tax --json              # machine-readable
+```
+
+Each count is one API call, plus one for the floor. The generated skills live in
+a temp directory and are deleted on exit.
+
 ## What I'd like
 
 Run the `ok` prompt and tell me your floor, with a rough count of how many MCP
